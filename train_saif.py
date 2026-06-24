@@ -52,7 +52,7 @@ def parse_args():
     parser.add_argument("--label-len", type=int, default=48, help="Known decoder context length.")
     parser.add_argument("--pred-len", type=int, default=24, help="Forecast horizon.")
     parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-5)
     parser.add_argument("--d-model", type=int, default=512)
@@ -182,16 +182,30 @@ def evaluate_and_save(model, test_ds, scaler, indices, save_dir, plot_samples, d
             total_inside_ci_points += int(np.sum(inside))
             total_points_evaluated += len(true_val)
 
+           # 在迴圈內，預先算好相對步數與安全百分比誤差
+            horizon_steps = np.arange(1, len(true_val) + 1)
+
+            # 避免除以零的防彈型 APE 寫法
+            safe_denominator = np.where(np.abs(true_val) < 1e-4, 1e-4, np.abs(true_val))
+            ape = np.abs(diff) / safe_denominator
+
             all_results.append(pd.DataFrame({
                 "Test_Sample_Sequence": i + 1,
                 "Dataset_Index": idx,
+                "Horizon_Step": horizon_steps,           # [新增] 1到24，方便分步統計衰退率
                 "Timestamp": stamps,
+                
+                # --- 核心預測表現 ---
                 "Actual_Price": true_val,
                 "Predicted_Mean": pred_mu,
                 "Difference_Error": diff,
+                "Absolute_Pct_Error": ape,               # [新增] 商業體感誤差
+                
+                # --- 風險邊界(CI)表現 ---
                 "CI_Lower": lower_bound,
                 "CI_Upper": upper_bound,
                 "CI_Width": ci_range,
+                "Inside_CI": inside.astype(int),         # [新增] 1=命中區間，0=破位暴雷
             }))
 
             if i < plot_samples:
