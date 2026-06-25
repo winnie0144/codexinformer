@@ -128,5 +128,5 @@ class InformerSAIF(nn.Module):
         f_out = self.projection(dec_out[:, -self.pred_len :, :])
 
         mu = f_out[:, :, 0]
-        log_var = torch.clamp(f_out[:, :, 1], min=-5.0, max=3.0)
+        log_var = torch.clamp(f_out[:, :, 1], min=-5.0, max=5.0)
         return mu, log_var

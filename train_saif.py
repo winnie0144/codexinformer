@@ -50,9 +50,11 @@ def parse_args():
     parser.add_argument("--output-dir", default=None, help="Folder for prediction CSV, plots, and checkpoint.")
     parser.add_argument("--seq-len", type=int, default=96, help="Encoder history length.")
     parser.add_argument("--label-len", type=int, default=48, help="Known decoder context length.")
-    parser.add_argument("--pred-len", type=int, default=24, help="Forecast horizon.")
+    # 原本：parser.add_argument("--pred-len", type=int, default=24, help="Forecast horizon.")
+    # 修改後：預設跑 30 小時，把最後 6 小時當作邊界擋箭牌
+    parser.add_argument("--pred-len", type=int, default=30, help="Forecast horizon (internally 30, we slice 24).")
     parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--epochs", type=int, default=200)
+    parser.add_argument("--epochs", type=int, default=300)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-5)
     parser.add_argument("--d-model", type=int, default=512)
@@ -94,11 +96,21 @@ def load_price_data(data_path, skip_rows):
 
 
 def improved_nll_loss(mu, log_var, y, alpha=0.1):
+    # 1. NLL 依然留在縮放空間（y 和 mu）計算，保證梯度穩定不爆炸
     precision = torch.exp(-torch.clamp(log_var, min=-5, max=5))
     nll = 0.5 * precision * (y - mu) ** 2 + 0.5 * log_var
-    weight = torch.clamp(torch.abs(y), min=1.0, max=5.0)
-    mse = (y - mu) ** 2
-    return torch.mean(weight * (nll + alpha * mse))
+    
+    # 2. 【新增】將 y 和 mu 透過 torch.sinh 局部還原回真實電價空間（Dollar Space）
+    y_dollar = torch.sinh(y)
+    mu_dollar = torch.sinh(mu)
+    
+    # 3. 在真實空間計算 MSE 與 尖峰權重，大噴發時模型才會感受到真正的「暴雷痛覺」
+    # 將 weight 上限從 5.0 放寬到 500.0，因為真實空間的電價波動極大
+    weight = torch.clamp(torch.abs(y_dollar), min=1.0, max=500.0)
+    mse_dollar = (y_dollar - mu_dollar) ** 2
+    
+    # 組合 Loss：NLL 負責大趨勢，後半段負責壓制真實空間的超級尖峰
+    return torch.mean(nll + alpha * (weight * mse_dollar))
 
 
 def make_eval_indices(mode, total_len, stamps, max_eval_windows):
@@ -136,7 +148,14 @@ def train_one_epoch(model, loader, optimizer, device):
 
         optimizer.zero_grad()
         mu, log_var = model(bx_enc, bm_enc, bx_dec, bm_dec)
-        loss = improved_nll_loss(mu, log_var, by)
+        
+        # --- 【新增】訓練切片防禦：只拿前 24 小時算 Loss ---
+        # 讓模型把尾端的邊界混亂自己吸收到第 25 ~ 30 小時去
+        mu_slice = mu[:, :24]
+        log_var_slice = log_var[:, :24]
+        by_slice = by[:, :24]
+        
+        loss = improved_nll_loss(mu_slice, log_var_slice, by_slice)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
@@ -162,11 +181,23 @@ def evaluate_and_save(model, test_ds, scaler, indices, save_dir, plot_samples, d
                 bm_dec.unsqueeze(0).to(device),
             )
 
+            # --- 【新增】評估切片防禦：只截取前 24 小時進行商業結算 ---
+            mu = mu[:, :24]
+            log_var = log_var[:, :24]
+            by = by[:24]
+            stamps = stamps[:24]
+
             mu_scaled = mu.cpu().numpy()[0]
             log_var_scaled = log_var.cpu().numpy()[0]
             std_scaled = np.exp(0.5 * log_var_scaled)
-            lower_scaled = mu_scaled - 1.96 * std_scaled
-            upper_scaled = mu_scaled + 1.96 * std_scaled
+            
+            # --- 【新增】溫度校正放大係數 Beta ---
+            # 依據盤後統計，常態區間誤差約 52 元，但模型區間只給 30 元，因此調整放大 2.2 倍
+            beta = 2.2 
+            
+            # 將原本的 1.96 乘以 beta
+            lower_scaled = mu_scaled - (1.96 * beta) * std_scaled
+            upper_scaled = mu_scaled + (1.96 * beta) * std_scaled
 
             pred_mu = scaler.inverse_rrp(mu_scaled)
             lower_bound = scaler.inverse_rrp(lower_scaled)
