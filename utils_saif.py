@@ -25,22 +25,26 @@ class SAIFScaler:
         self.scaler = RobustScaler() 
         
     def fit_transform(self, df):
-        # 使用 arcsinh 代替 log1p，徹底解決 nan 問題
         df['RRP_trans'] = np.arcsinh(df['RRP']) 
+        df['Demand_trans'] = np.arcsinh(df['TOTALDEMAND'])
         
-        # 修正 fillna 警告：使用 bfill() 代替 fillna(method='bfill')[cite: 15]
+        # 原有特徵
         df['RRP_lag24'] = df['RRP_trans'].shift(24).bfill()
         df['RRP_ma12'] = df['RRP_trans'].rolling(window=12).mean().bfill()
         
-        # 需求量也建議用 arcsinh 處理[cite: 15]
-        df['Demand_trans'] = np.arcsinh(df['TOTALDEMAND'])
+        # --- 【新增 1】RRP_lag168 (歷史同日同時段錨點，168小時 = 7天) ---
+        df['RRP_lag168'] = df['RRP_trans'].shift(168).bfill()
         
-        features = df[['RRP_trans', 'Demand_trans', 'RRP_lag24', 'RRP_ma12']].values
+        # --- 【新增 2】RRP_std24 (近期波動率指標，捕捉市場混亂度) ---
+        df['RRP_std24'] = df['RRP_trans'].rolling(window=24).std().bfill()
+        
+        # 將新特徵加入 features 陣列 (現在總共 6 個特徵)
+        features = df[['RRP_trans', 'Demand_trans', 'RRP_lag24', 'RRP_ma12', 'RRP_lag168', 'RRP_std24']].values
         return self.scaler.fit_transform(features)
 
     def inverse_rrp(self, scaled_rrp):
-        dummy = np.zeros((len(scaled_rrp), 4))
+        # --- 【修改】因為特徵數從 4 變成 6，用來反轉縮放的空矩陣寬度要改成 6 ---
+        dummy = np.zeros((len(scaled_rrp), 6))
         dummy[:, 0] = scaled_rrp
         inv = self.scaler.inverse_transform(dummy)[:, 0]
-        # 使用 sinh 還原 arcsinh[cite: 15]
         return np.sinh(inv)

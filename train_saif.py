@@ -54,7 +54,7 @@ def parse_args():
     # 修改後：預設跑 30 小時，把最後 6 小時當作邊界擋箭牌
     parser.add_argument("--pred-len", type=int, default=30, help="Forecast horizon (internally 30, we slice 24).")
     parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--epochs", type=int, default=300)
+    parser.add_argument("--epochs", type=int, default=250)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-5)
     parser.add_argument("--d-model", type=int, default=512)
@@ -96,20 +96,22 @@ def load_price_data(data_path, skip_rows):
 
 
 def improved_nll_loss(mu, log_var, y, alpha=0.1):
-    # 1. NLL 依然留在縮放空間（y 和 mu）計算，保證梯度穩定不爆炸
-    precision = torch.exp(-torch.clamp(log_var, min=-5, max=5))
-    nll = 0.5 * precision * (y - mu) ** 2 + 0.5 * log_var
+    # 【關鍵手術 1】嚴格限制 log_var 的下限！
+    # 原本是 min=-5.0 (代表標準差允許縮到 0.08，太小了)
+    # 將下限鎖定在 min=-1.5 (代表標準差 \sigma 最小只能到 ~0.47)
+    # 這等於在縮放空間地下室焊死了一塊鋼板，禁止 Loss 鑽地道作弊
+    bounded_log_var = torch.clamp(log_var, min=-1.5, max=5.0)
     
-    # 2. 【新增】將 y 和 mu 透過 torch.sinh 局部還原回真實電價空間（Dollar Space）
+    precision = torch.exp(-bounded_log_var)
+    nll = 0.5 * precision * (y - mu) ** 2 + 0.5 * bounded_log_var
+    
+    # 真實空間還原計算
     y_dollar = torch.sinh(y)
     mu_dollar = torch.sinh(mu)
     
-    # 3. 在真實空間計算 MSE 與 尖峰權重，大噴發時模型才會感受到真正的「暴雷痛覺」
-    # 將 weight 上限從 5.0 放寬到 500.0，因為真實空間的電價波動極大
     weight = torch.clamp(torch.abs(y_dollar), min=1.0, max=500.0)
     mse_dollar = (y_dollar - mu_dollar) ** 2
     
-    # 組合 Loss：NLL 負責大趨勢，後半段負責壓制真實空間的超級尖峰
     return torch.mean(nll + alpha * (weight * mse_dollar))
 
 
@@ -313,8 +315,8 @@ def main():
 
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
     model = InformerSAIF(
-        enc_in=4,
-        dec_in=4,
+        enc_in=6,   # <--- 【修改】從 4 改成 6 (對應資料的 6 個特徵)
+        dec_in=6,   # <--- 【修改】從 4 改成 6
         out_len=args.pred_len,
         d_model=args.d_model,
         nhead=args.nhead,
