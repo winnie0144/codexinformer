@@ -100,7 +100,7 @@ def improved_nll_loss(mu, log_var, y, alpha=0.1):
     # 原本是 min=-5.0 (代表標準差允許縮到 0.08，太小了)
     # 將下限鎖定在 min=-1.5 (代表標準差 \sigma 最小只能到 ~0.47)
     # 這等於在縮放空間地下室焊死了一塊鋼板，禁止 Loss 鑽地道作弊
-    bounded_log_var = torch.clamp(log_var, min=-1.5, max=5.0)
+    bounded_log_var = torch.clamp(log_var, min=-2.5, max=5.0)
     
     precision = torch.exp(-bounded_log_var)
     nll = 0.5 * precision * (y - mu) ** 2 + 0.5 * bounded_log_var
@@ -202,8 +202,11 @@ def evaluate_and_save(model, test_ds, scaler, indices, save_dir, plot_samples, d
             upper_scaled = mu_scaled + (1.96 * beta) * std_scaled
 
             pred_mu = scaler.inverse_rrp(mu_scaled)
-            lower_bound = scaler.inverse_rrp(lower_scaled)
-            upper_bound = scaler.inverse_rrp(upper_scaled)
+            std_scaled = np.exp(0.5 * log_var_scaled)
+            # 動態邊界公式：基準寬度設為 130 元，隨模型感知的不確定性連動擴張
+            dynamic_margin = 130.0 * (std_scaled / 0.47)
+            lower_bound = pred_mu - dynamic_margin
+            upper_bound = pred_mu + dynamic_margin
             true_val = scaler.inverse_rrp(by.numpy())
 
             diff = true_val - pred_mu
