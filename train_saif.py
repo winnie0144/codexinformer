@@ -54,7 +54,7 @@ def parse_args():
     # 修改後：預設跑 30 小時，把最後 6 小時當作邊界擋箭牌
     parser.add_argument("--pred-len", type=int, default=30, help="Forecast horizon (internally 30, we slice 24).")
     parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--epochs", type=int, default=250)
+    parser.add_argument("--epochs", type=int, default=300)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-5)
     parser.add_argument("--d-model", type=int, default=512)
@@ -192,14 +192,15 @@ def evaluate_and_save(model, test_ds, scaler, indices, save_dir, plot_samples, d
             mu_scaled = mu.cpu().numpy()[0]
             log_var_scaled = log_var.cpu().numpy()[0]
             std_scaled = np.exp(0.5 * log_var_scaled)
-            
-            # --- 【新增】溫度校正放大係數 Beta ---
-            # 依據盤後統計，常態區間誤差約 52 元，但模型區間只給 30 元，因此調整放大 2.2 倍
-            beta = 2.2 
-            
-            # 將原本的 1.96 乘以 beta
-            lower_scaled = mu_scaled - (1.96 * beta) * std_scaled
-            upper_scaled = mu_scaled + (1.96 * beta) * std_scaled
+
+            pred_mu = scaler.inverse_rrp(mu_scaled)
+
+            # 導入校正係數 gamma，例如 1.25，將單邊區間稍微撐開
+            gamma = 1.25
+            dynamic_margin = (1.96 * gamma * std_scaled) * (pred_mu * 0.1 + 50) # 結合價格比例與基礎緩衝
+
+            lower_bound = pred_mu - dynamic_margin
+            upper_bound = pred_mu + dynamic_margin
 
             pred_mu = scaler.inverse_rrp(mu_scaled)
             std_scaled = np.exp(0.5 * log_var_scaled)
