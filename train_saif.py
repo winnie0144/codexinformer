@@ -164,6 +164,49 @@ def train_one_epoch(model, loader, optimizer, device):
         losses.append(loss.item())
     return float(np.mean(losses))
 
+class EarlyStopping:
+    def __init__(self, patience=15, verbose=False, delta=0, path='checkpoint.pth'):
+        """
+        Args:
+            patience (int): 容忍多少個 epoch Loss 沒有改善
+            verbose (bool): 是否印出存檔訊息
+            delta (float): Loss 至少要進步多少才算改善
+            path (str): 模型權重存檔路徑
+        """
+        self.patience = patience
+        self.verbose = verbose
+        self.counter = 0
+        self.best_score = None
+        self.early_stop = False
+        self.val_loss_min = np.inf
+        self.delta = delta
+        self.path = path
+
+    def __call__(self, val_loss, model):
+        # 【關鍵修改】將 val_loss 取絕對值，目標變成越靠近 0 越好
+        current_loss = abs(val_loss)
+        score = -current_loss
+
+        if self.best_score is None:
+            self.best_score = score
+            self.save_checkpoint(current_loss, val_loss, model)
+        elif score < self.best_score + self.delta:
+            self.counter += 1
+            if self.verbose:
+                print(f'EarlyStopping 倒數計時: {self.counter} / {self.patience}')
+            if self.counter >= self.patience:
+                self.early_stop = True
+        else:
+            self.best_score = score
+            self.save_checkpoint(current_loss, val_loss, model)
+            self.counter = 0
+
+    def save_checkpoint(self, current_loss, val_loss, model):
+        if self.verbose:
+            # 印出絕對值與原始 Loss 的對照，方便你觀察
+            print(f'Loss 絕對值下降 ({self.val_loss_min:.6f} --> {current_loss:.6f}) [原始 Loss: {val_loss:.6f}]. 儲存最佳模型...')
+        torch.save(model.state_dict(), self.path)
+        self.val_loss_min = current_loss
 
 def evaluate_and_save(model, test_ds, scaler, indices, save_dir, plot_samples, device):
     global_errors = []
@@ -334,13 +377,31 @@ def main():
 
     print(f"Device: {device}")
     print(f"Rows: {len(df)} | Train windows: {len(train_ds)} | Test windows: {len(test_ds)}")
+
+    checkpoint_path = os.path.join(output_dir, "informer_saif_checkpoint.pth")    
+    # 宣告 EarlyStopping 物件，容忍 15 個 Epoch 沒有進步就強制停止
+    early_stopping = EarlyStopping(patience=15, verbose=True, delta=0.01, path=checkpoint_path)
+
     print("Starting training...")
     for epoch in range(args.epochs):
         start_time = time.time()
         avg_loss = train_one_epoch(model, train_loader, optimizer, device)
         scheduler.step(avg_loss)
+        
         print(f"Epoch {epoch + 1:03d}/{args.epochs} | Loss: {avg_loss:.6f} | {time.time() - start_time:.1f}s")
+        
+        # 將目前的 Loss 丟給 EarlyStopping 檢查
+        early_stopping(avg_loss, model)
+        
+        if early_stopping.early_stop:
+            print("=====================================================")
+            print(f"啟動提早停止機制 (Early Stopping) 於 Epoch {epoch + 1}!")
+            print("=====================================================")
+            break
 
+    # 【超級關鍵】訓練迴圈結束（或被提早打斷）後，把剛才存下來的「最佳模型權重」讀取回來！
+    # 這樣後續跑 evaluate_and_save 評估時，用的才是最強的版本，而不是過擬合的最後一個版本。
+    model.load_state_dict(torch.load(checkpoint_path))
     checkpoint_path = os.path.join(output_dir, "informer_saif_checkpoint.pth")
     torch.save(model.state_dict(), checkpoint_path)
 
